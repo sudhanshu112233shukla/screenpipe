@@ -31,6 +31,7 @@ use tokio::time::timeout;
 pub async fn get_frame_data(
     State(state): State<Arc<AppState>>,
     Path(frame_id): Path<i64>,
+    Query(query): Query<FrameDataQuery>,
 ) -> Result<Response<Body>, (StatusCode, JsonResponse<Value>)> {
     let start_time = Instant::now();
 
@@ -140,18 +141,25 @@ pub async fn get_frame_data(
                         Err(_) => {
                             // Snapshot file missing (compacted/deleted) — try nearest frame
                             debug!(
-                                "Snapshot file missing for frame {}, trying nearest frame",
-                                frame_id
+                                "Snapshot file missing for frame {} (fallback={})",
+                                frame_id, query.fallback
                             );
-                            if let Some(fallback) = try_nearest_frame(&state, frame_id).await {
-                                return Ok(fallback);
+                            if query.fallback {
+                                if let Some(fallback) = try_nearest_frame(&state, frame_id).await {
+                                    return Ok(fallback);
+                                }
                             }
                             return Err((
-                                StatusCode::NOT_FOUND,
+                                StatusCode::GONE,
                                 JsonResponse(json!({
-                                    "error": "Snapshot file missing and no nearby frame available",
+                                    "error": if query.fallback {
+                                        "Snapshot file missing and no nearby frame available"
+                                    } else {
+                                        "Snapshot file missing"
+                                    },
                                     "error_type": "snapshot_missing",
-                                    "frame_id": frame_id
+                                    "frame_id": frame_id,
+                                    "fallback": query.fallback
                                 })),
                             ));
                         }
@@ -169,11 +177,13 @@ pub async fn get_frame_data(
                     Err(e) => {
                         // Extraction failed — try the nearest valid frame as fallback
                         debug!(
-                            "Frame {} extraction failed ({}), trying nearest frame",
-                            frame_id, e
+                            "Frame {} extraction failed ({}) (fallback={})",
+                            frame_id, e, query.fallback
                         );
-                        if let Some(fallback) = try_nearest_frame(&state, frame_id).await {
-                            return Ok(fallback);
+                        if query.fallback {
+                            if let Some(fallback) = try_nearest_frame(&state, frame_id).await {
+                                return Ok(fallback);
+                            }
                         }
 
                         // No fallback found either
@@ -187,7 +197,8 @@ pub async fn get_frame_data(
                                     "error_type": "ffprobe_not_found",
                                     "frame_id": frame_id,
                                     "file_path": file_path,
-                                    "details": err_str
+                                    "details": err_str,
+                                    "fallback": query.fallback
                                 })),
                             ))
                         } else if err_str.contains("VIDEO_CORRUPTED")
@@ -210,7 +221,8 @@ pub async fn get_frame_data(
                                 JsonResponse(json!({
                                     "error": format!("Failed to extract frame: {}", e),
                                     "frame_id": frame_id,
-                                    "file_path": file_path
+                                    "file_path": file_path,
+                                    "fallback": query.fallback
                                 })),
                             ))
                         }
@@ -247,6 +259,20 @@ pub async fn get_frame_data(
             ))
         }
     }
+}
+
+#[derive(Debug, Deserialize, OaSchema)]
+pub struct FrameDataQuery {
+    /// Whether `/frames/:id` may serve nearby pixels when exact frame media is unavailable.
+    ///
+    /// Defaults to true for timeline browsing. Search thumbnails and search-to-timeline
+    /// navigation pass `fallback=false` so a text hit never displays another frame's image.
+    #[serde(default = "default_frame_fallback")]
+    pub fallback: bool,
+}
+
+fn default_frame_fallback() -> bool {
+    true
 }
 
 /// Query parameters for finding the next valid frame
@@ -1002,3 +1028,22 @@ pub use super::content::FrameContent;
 
 /// extract_high_quality_frame re-export for video export
 pub use crate::video_utils::extract_high_quality_frame as extract_hq_frame;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_data_query_defaults_to_fallback_enabled() {
+        let parsed: FrameDataQuery = serde_json::from_str("{}").expect("query should deserialize");
+        assert!(parsed.fallback);
+        assert!(default_frame_fallback());
+    }
+
+    #[test]
+    fn frame_data_query_can_disable_fallback() {
+        let parsed: FrameDataQuery =
+            serde_json::from_str(r#"{"fallback":false}"#).expect("query should deserialize");
+        assert!(!parsed.fallback);
+    }
+}

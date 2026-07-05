@@ -21,7 +21,8 @@ import { cn } from "@/lib/utils";
 import { commands } from "@/lib/utils/tauri";
 import { showChatWithPrefill } from "@/lib/chat-utils";
 import { ThumbnailHighlightOverlay } from "./thumbnail-highlight-overlay";
-import { localFetch, getApiBaseUrl, appendAuthToken } from "@/lib/api";
+import { localFetch } from "@/lib/api";
+import { frameImageUrl } from "@/lib/frame-image-url";
 import { buildBoundedFacetSql, sanitizeFts5Query } from "@/lib/search/facet-sql";
 import { searchInputBehaviorProps } from "@/lib/search-input-behavior";
 
@@ -287,7 +288,7 @@ const FrameThumbnail = ({ frameId, alt }: { frameId: number; alt: string }) => {
   // Without this every thumbnail 403s and shows "unavailable" on packaged
   // builds, where the webview origin (tauri://localhost) differs from the API
   // host (localhost:3030) so the screenpipe_auth cookie isn't sent.
-  const [src, setSrc] = useState(appendAuthToken(`${getApiBaseUrl()}/frames/${frameId}`));
+  const [src, setSrc] = useState(frameImageUrl(frameId, { exact: true }));
   const retryCount = useRef(0);
 
   // State resets on a new frameId via `key={frameId}` at each render site —
@@ -322,7 +323,7 @@ const FrameThumbnail = ({ frameId, alt }: { frameId: number; alt: string }) => {
             if (retryCount.current < 3) {
               retryCount.current += 1;
               setTimeout(() => {
-                setSrc(appendAuthToken(`${getApiBaseUrl()}/frames/${frameId}?retry=${retryCount.current}`));
+                setSrc(frameImageUrl(frameId, { exact: true, retry: retryCount.current }));
               }, 1000 * retryCount.current);
             } else {
               setIsLoading(false);

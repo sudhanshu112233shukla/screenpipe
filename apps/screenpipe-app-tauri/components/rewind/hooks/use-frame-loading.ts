@@ -6,6 +6,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { StreamTimeSeriesResponse } from "@/components/rewind/timeline";
 import posthog from "posthog-js";
 import { getApiBaseUrl, appendAuthToken } from "@/lib/api";
+import { frameImageUrl } from "@/lib/frame-image-url";
 
 // Debounce delay for frame loading (ms) — reduced for arrow keys
 const FRAME_LOAD_DEBOUNCE_MS = 80;
@@ -130,6 +131,9 @@ export function useFrameLoading(opts: {
 		if (!frameId || !filePath) {
 			setDebouncedFrame(null);
 			setIsLoading(false);
+			if (searchNavFrame) {
+				onFrameUnavailable?.();
+			}
 			setHasError(false);
 			setNaturalDimensions(null);
 			setRenderedImageInfo(null);
@@ -426,7 +430,7 @@ export function useFrameLoading(opts: {
 		if (!debouncedFrame) return null;
 		// Force HTTP JPEG for search navigation (skip slow video seek)
 		if (searchNavFrame) {
-			return appendAuthToken(`${getApiBaseUrl()}/frames/${debouncedFrame.frameId}`);
+			return frameImageUrl(debouncedFrame.frameId, { exact: true });
 		}
 		// Snapshot failed to load from disk — need HTTP fallback regardless of video mode
 		if (isSnapshotFrame && snapshotFailed) {
@@ -468,6 +472,9 @@ export function useFrameLoading(opts: {
 		img.onerror = () => {
 			// Preload failed — keep showing previous image if available
 			setIsLoading(false);
+			if (searchNavFrame) {
+				onFrameUnavailable?.();
+			}
 			// For snapshot frames where both direct + HTTP failed, signal unavailable
 			if (isSnapshotFrame && snapshotFailed) {
 				onFrameUnavailable?.();
