@@ -24,12 +24,12 @@ public func shortcutSetMeetingActive(_ active: Int32) {
 
 // MARK: - Metrics data pushed from Rust
 
-struct OverlayMetrics {
-    var audioActive: Bool = false
-    var speechRatio: Double = 0
-    var screenActive: Bool = false
-    var captureFps: Double = 0
-    var meetingActive: Bool = false
+final class OverlayMetrics: ObservableObject {
+    @Published var audioActive: Bool = false
+    @Published var speechRatio: Double = 0
+    @Published var screenActive: Bool = false
+    @Published var captureFps: Double = 0
+    @Published var meetingActive: Bool = false
 }
 
 // MARK: - Font helper (same as notification panel)
@@ -66,7 +66,7 @@ class AnimationTick: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0/60, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0/30, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             self.value += 1.0/60
             // LERP bar heights toward targets each frame
@@ -120,7 +120,6 @@ struct AudioEqualizerView: View {
                 )
             }
         }
-        .drawingGroup()
     }
 }
 
@@ -162,7 +161,6 @@ struct ScreenMatrixView: View {
                 )
             }
         }
-        .drawingGroup()
     }
 }
 
@@ -181,7 +179,7 @@ struct ShortcutReminderView: View {
     let overlayShortcut: String
     let chatShortcut: String
     let searchShortcut: String
-    let metrics: OverlayMetrics
+    @ObservedObject var metrics: OverlayMetrics
     let scale: CGFloat
     let onAction: (String) -> Void
     @Binding var isExpanded: Bool
@@ -546,7 +544,6 @@ class ShortcutReminderController: NSObject {
             self.metrics.speechRatio = min(1, audioLevel * 15)
             self.metrics.screenActive = deltaFrames > 0
             self.metrics.captureFps = Double(deltaFrames) / 0.5
-            self.updateContent()
         }
     }
 
@@ -597,10 +594,7 @@ class ShortcutReminderController: NSObject {
 
     func setMeetingActive(_ active: Bool) {
         DispatchQueue.main.async { [self] in
-            if self.metrics.meetingActive != active {
-                self.metrics.meetingActive = active
-                self.updateContent()
-            }
+            self.metrics.meetingActive = active
         }
     }
 

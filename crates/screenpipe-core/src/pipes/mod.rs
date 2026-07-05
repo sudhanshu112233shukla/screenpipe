@@ -31,7 +31,8 @@ use chrono::{
 };
 use cron::Schedule as CronSchedule;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -2436,7 +2437,8 @@ impl PipeManager {
                 // Fallback: no declarations → scan <pipe_dir>/output/, newest
                 // `fallback_cap` files by mtime.
                 let output_dir = pipe_dir.join("output");
-                let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+                let mut newest: BinaryHeap<Reverse<(std::time::SystemTime, std::path::PathBuf)>> =
+                    BinaryHeap::new();
                 if let Ok(mut entries) = tokio::fs::read_dir(&output_dir).await {
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let path = entry.path();
@@ -2464,9 +2466,16 @@ impl PipeManager {
                             .await
                             .and_then(|m| m.modified())
                             .unwrap_or(std::time::UNIX_EPOCH);
-                        candidates.push((path, mtime));
+                        newest.push(Reverse((mtime, path)));
+                        if newest.len() > fallback_cap {
+                            newest.pop();
+                        }
                     }
                 }
+                let candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = newest
+                    .into_iter()
+                    .map(|Reverse((mtime, path))| (path, mtime))
+                    .collect();
                 for (path, _) in select_newest_files(candidates, fallback_cap) {
                     let kind = match path.extension().and_then(|e| e.to_str()) {
                         Some("md") => "markdown",
