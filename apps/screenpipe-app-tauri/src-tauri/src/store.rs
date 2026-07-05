@@ -7,8 +7,9 @@ use screenpipe_secrets::keychain;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use specta::Type;
-use std::path::Path;
-use std::sync::{Arc, Mutex, RwLock};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use tauri::AppHandle;
 use tauri_plugin_store::StoreBuilder;
 use tracing::{error, warn};
@@ -26,6 +27,15 @@ use tracing::{error, warn};
 /// within the same process — OnceLock would silently ignore the second
 /// seed call and keep the original key forever.
 static RESOLVED_API_AUTH_KEY: RwLock<Option<String>> = RwLock::new(None);
+
+/// Cache the last plaintext bytes we already durably flushed and re-encrypted
+/// for each store path. This keeps repeated no-op saves from redoing the
+/// expensive disk snapshot/encrypt work.
+static LAST_REENCRYPTED_STORE_BYTES: OnceLock<Mutex<HashMap<PathBuf, Vec<u8>>>> = OnceLock::new();
+
+fn last_reencrypted_store_bytes() -> &'static Mutex<HashMap<PathBuf, Vec<u8>>> {
+    LAST_REENCRYPTED_STORE_BYTES.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Seed the resolved API auth key. Overwrites any previously seeded value
 /// so that "Apply & Restart" picks up the new key on the next server start.
@@ -472,46 +482,62 @@ fn encrypt_store_file(path: &Path) {
     }
 }
 
-/// Re-encrypt store.bin on disk. Called after the Tauri store plugin writes plain JSON.
-/// Also syncs the .encrypt-store flag file from the encryptStore setting.
-pub fn reencrypt_store_file(app: &AppHandle) {
-    if let Ok(base_dir) = get_base_dir(app, None) {
-        // Sync the flag file from the store's encryptStore setting
-        let flag_path = base_dir.join(".encrypt-store");
-        let store_path = base_dir.join("store.bin");
+fn reencrypt_store_dir(base_dir: &Path) -> bool {
+    // Sync the flag file from the store's encryptStore setting.
+    let flag_path = base_dir.join(".encrypt-store");
+    let store_path = base_dir.join("store.bin");
 
-        // Read the setting from the store JSON on disk. If the file is missing,
-        // encrypted, or temporarily unparsable, leave the flag unchanged; defaulting
-        // to "on" here silently opts users into repeated re-encryption churn.
-        let encrypt_enabled = std::fs::read(&store_path)
-            .ok()
-            .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
-            .and_then(|json| {
-                json.get("settings")
-                    .and_then(|s| s.get("encryptStore"))
-                    .and_then(|v| v.as_bool())
-            });
+    // Read the setting from the store JSON on disk. If the file is missing,
+    // encrypted, or temporarily unparsable, leave the flag unchanged; defaulting
+    // to "on" here silently opts users into repeated re-encryption churn.
+    let encrypt_enabled = std::fs::read(&store_path)
+        .ok()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .and_then(|json| {
+            json.get("settings")
+                .and_then(|s| s.get("encryptStore"))
+                .and_then(|v| v.as_bool())
+        });
 
-        if let Some(encrypt_enabled) = encrypt_enabled {
-            if encrypt_enabled && !flag_path.exists() {
-                let _ = std::fs::write(&flag_path, b"");
-            } else if !encrypt_enabled && flag_path.exists() {
-                let _ = std::fs::remove_file(&flag_path);
-            }
+    if let Some(encrypt_enabled) = encrypt_enabled {
+        if encrypt_enabled && !flag_path.exists() {
+            let _ = std::fs::write(&flag_path, b"");
+        } else if !encrypt_enabled && flag_path.exists() {
+            let _ = std::fs::remove_file(&flag_path);
+        }
+    }
+    let encryption_opted_in = std::env::var("SCREENPIPE_ENCRYPT_STORE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+        || flag_path.exists();
+
+    // Durably flush the plugin's non-atomic write of store.bin before we
+    // snapshot or encrypt it. tauri-plugin-store saves via fs::write
+    // (O_TRUNC, no fsync), leaving a window where a power loss truncates
+    // the file to zero/partial; rewriting it atomically + fsync closes that
+    // window so the on-disk store is always a complete document. Guarded on
+    // non-empty so a transient empty read never clobbers a good file.
+    if let Ok(bytes) = std::fs::read(&store_path) {
+        if bytes.is_empty() {
+            return false;
         }
 
-        // Durably flush the plugin's non-atomic write of store.bin before we
-        // snapshot or encrypt it. tauri-plugin-store saves via fs::write
-        // (O_TRUNC, no fsync), leaving a window where a power loss truncates
-        // the file to zero/partial; rewriting it atomically + fsync closes that
-        // window so the on-disk store is always a complete document. Guarded on
-        // non-empty so a transient empty read never clobbers a good file.
-        if let Ok(bytes) = std::fs::read(&store_path) {
-            if !bytes.is_empty() {
-                if let Err(e) = durable_write(&store_path, &bytes) {
-                    tracing::warn!("durable flush of store.bin failed: {}", e);
+        if !encryption_opted_in {
+            if let Ok(cache) = last_reencrypted_store_bytes().lock() {
+                if cache.get(&store_path).is_some_and(|last| last == &bytes) {
+                    return false;
                 }
             }
+        } else if is_encrypted_blob(&bytes) {
+            if let Ok(mut cache) = last_reencrypted_store_bytes().lock() {
+                cache.remove(&store_path);
+            }
+            return false;
+        }
+
+        if let Err(e) = durable_write(&store_path, &bytes) {
+            tracing::warn!("durable flush of store.bin failed: {}", e);
+            return false;
         }
 
         // L1 — snapshot the current state to .last-good IFF it's healthy
@@ -522,6 +548,20 @@ pub fn reencrypt_store_file(app: &AppHandle) {
         snapshot_last_good(&store_path);
 
         encrypt_store_file(&store_path);
+
+        if let Ok(mut cache) = last_reencrypted_store_bytes().lock() {
+            cache.insert(store_path, bytes);
+        }
+        return true;
+    }
+    false
+}
+
+/// Re-encrypt store.bin on disk. Called after the Tauri store plugin writes plain JSON.
+/// Also syncs the .encrypt-store flag file from the encryptStore setting.
+pub fn reencrypt_store_file(app: &AppHandle) {
+    if let Ok(base_dir) = get_base_dir(app, None) {
+        let _ = reencrypt_store_dir(&base_dir);
     }
 }
 
@@ -2684,5 +2724,19 @@ mod tests {
         assert_eq!(settings.user.token, None);
         assert_eq!(settings.embedded_llm.enabled, false);
         assert_eq!(settings.ai_presets.len(), 0);
+    }
+
+    #[test]
+    fn test_reencrypt_store_dir_skips_unchanged_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store_path = tmp.path().join("store.bin");
+        std::fs::write(
+            &store_path,
+            r#"{"settings":{"encryptStore":false,"aiPresets":[{"provider":"custom"}]}}"#,
+        )
+        .expect("seed store");
+
+        assert!(reencrypt_store_dir(tmp.path()));
+        assert!(!reencrypt_store_dir(tmp.path()));
     }
 }
