@@ -1,5 +1,3 @@
-
-
 import { appendAuthToken, getApiBaseUrl } from "@/lib/api";
 
 export function frameImageUrl(

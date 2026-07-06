@@ -150,7 +150,7 @@ pub async fn get_frame_data(
                                 }
                             }
                             return Err((
-                                StatusCode::GONE,
+                                StatusCode::NOT_FOUND,
                                 JsonResponse(json!({
                                     "error": if query.fallback {
                                         "Snapshot file missing and no nearby frame available"
