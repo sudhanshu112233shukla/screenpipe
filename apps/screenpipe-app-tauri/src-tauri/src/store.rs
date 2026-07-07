@@ -522,13 +522,13 @@ fn reencrypt_store_dir(base_dir: &Path) -> bool {
             return false;
         }
 
-        if !encryption_opted_in {
-            if let Ok(cache) = last_reencrypted_store_bytes().lock() {
-                if cache.get(&store_path).is_some_and(|last| last == &bytes) {
-                    return false;
-                }
-            }
-        } else if is_encrypted_blob(&bytes) {
+        let already_processed = !encryption_opted_in
+            && last_reencrypted_store_bytes()
+                .lock()
+                .ok()
+                .is_some_and(|cache| cache.get(&store_path).is_some_and(|last| last == &bytes));
+
+        if encryption_opted_in && is_encrypted_blob(&bytes) {
             if let Ok(mut cache) = last_reencrypted_store_bytes().lock() {
                 cache.remove(&store_path);
             }
@@ -537,6 +537,13 @@ fn reencrypt_store_dir(base_dir: &Path) -> bool {
 
         if let Err(e) = durable_write(&store_path, &bytes) {
             tracing::warn!("durable flush of store.bin failed: {}", e);
+            return false;
+        }
+
+        if already_processed {
+            // Keep the durable flush on cache hits because the plugin just
+            // rewrote store.bin with O_TRUNC. Only the expensive
+            // snapshot/encrypt work is skipped.
             return false;
         }
 

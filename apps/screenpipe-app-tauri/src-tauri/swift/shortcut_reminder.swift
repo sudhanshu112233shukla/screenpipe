@@ -68,7 +68,7 @@ class AnimationTick: ObservableObject {
         guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0/30, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.value += 1.0/60
+            self.value += 1.0/30
             // LERP bar heights toward targets each frame
             for i in 0..<self.currentHeights.count {
                 self.currentHeights[i] += (self.targetHeights[i] - self.currentHeights[i]) * 0.12
