@@ -576,7 +576,7 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 				/>
 			)}
 
-			{hasError && (
+			{hasError && searchNavFrame && (
 				<div className="absolute inset-0 z-[3] flex items-center justify-center bg-background text-xs font-mono text-muted-foreground">
 					this exact frame is unavailable
 				</div>
